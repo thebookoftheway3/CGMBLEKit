@@ -63,6 +63,13 @@ public struct ResearchConnectionDiagnostics {
 #endif
 
 #if LIVE_READ_ONLY
+/// Use monotonic time so wall-clock corrections cannot bypass reconnect pacing.
+struct ResearchReconnectCooldown {
+    private var deadline: TimeInterval = 0
+    mutating func disconnected(at now: TimeInterval) { deadline = now + 2 }
+    func permitsLookup(at now: TimeInterval) -> Bool { now >= deadline }
+}
+
 /// Connection notifications are hints, never permission to connect a cached peer.
 enum ResearchConnectionRecovery {
     static func onEvent(enabled: Bool, peerConnected: Bool, lookup: () -> Void) {
@@ -149,6 +156,7 @@ class BluetoothManager: NSObject {
     private let lockedStayConnected: Locked<Bool> = Locked(false)
     private var restoredPeripherals: [CBPeripheral] = [] // managerQueue only
     private var eventsRegistered = false
+    private var reconnectCooldown = ResearchReconnectCooldown() // managerQueue only
     #else
     private let lockedStayConnected: Locked<Bool> = Locked(true)
     #endif
@@ -283,6 +291,7 @@ class BluetoothManager: NSObject {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         #if LIVE_READ_ONLY
         guard stayConnected else { return }
+        guard reconnectCooldown.permitsLookup(at: ProcessInfo.processInfo.systemUptime) else { return }
         #endif
 
         guard manager.state == .poweredOn else {
@@ -365,9 +374,10 @@ class BluetoothManager: NSObject {
      */
     fileprivate func scanAfterDelay() {
         #if LIVE_READ_ONLY
-        // Do not sleep through the short background execution window. Future
-        // connection events trigger fresh system-connected lookup without a timer.
-        managerQueue.async { self.managerQueue_scanForPeripheral() }
+        // Preserve upstream's transmitter shut-down interval without blocking a
+        // callback queue. Every lookup entry point also observes this cooldown.
+        reconnectCooldown.disconnected(at: ProcessInfo.processInfo.systemUptime)
+        managerQueue.asyncAfter(deadline: .now() + 2) { self.managerQueue_scanForPeripheral() }
         #else
         DispatchQueue.global(qos: .utility).async {
             Thread.sleep(forTimeInterval: 2)

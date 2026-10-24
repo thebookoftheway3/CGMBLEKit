@@ -436,8 +436,15 @@ extension PeripheralManager: CBPeripheralDelegate {
             }
         } else if let macro = configuration.valueUpdateMacros[characteristic.uuid] {
             macro(self)
-        } else if commandConditions.isEmpty {
-            notifyDelegate = true // execute after the unlock
+        } else {
+            #if LIVE_READ_ONLY
+            // Passive control/time updates are unsolicited: a pending discovery
+            // or notification-state acknowledgement must not swallow them.
+            // A failed callback can contain a stale characteristic.value.
+            notifyDelegate = error == nil
+            #else
+            notifyDelegate = commandConditions.isEmpty
+            #endif
         }
 
         commandLock.unlock()
