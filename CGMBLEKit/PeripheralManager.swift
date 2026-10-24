@@ -9,6 +9,16 @@ import CoreBluetooth
 import Foundation
 import os.log
 
+#if LIVE_READ_ONLY
+/// Never block CoreBluetooth's callback queue behind discovery waiting for that
+/// same queue. Invalidation remains ordered before the next perform operation.
+enum ResearchPeripheralConfiguration {
+    static func invalidate(on queue: DispatchQueue, update: @escaping () -> Void) {
+        queue.async(execute: update)
+    }
+}
+#endif
+
 
 class PeripheralManager: NSObject {
 
@@ -27,9 +37,11 @@ class PeripheralManager: NSObject {
             oldValue.delegate = nil
             peripheral.delegate = self
 
-            queue.sync {
-                self.needsConfiguration = true
-            }
+            #if LIVE_READ_ONLY
+            ResearchPeripheralConfiguration.invalidate(on: queue) { self.needsConfiguration = true }
+            #else
+            queue.sync { self.needsConfiguration = true }
+            #endif
         }
     }
 
@@ -54,9 +66,11 @@ class PeripheralManager: NSObject {
 
     weak var delegate: PeripheralManagerDelegate? {
         didSet {
-            queue.sync {
-                needsConfiguration = true
-            }
+            #if LIVE_READ_ONLY
+            ResearchPeripheralConfiguration.invalidate(on: queue) { self.needsConfiguration = true }
+            #else
+            queue.sync { needsConfiguration = true }
+            #endif
         }
     }
 
@@ -69,7 +83,10 @@ class PeripheralManager: NSObject {
 
         peripheral.delegate = self
 
+        #if !LIVE_READ_ONLY
         assertConfiguration()
+        #endif
+        // Research configuration starts from readiness after delegate attachment.
     }
 }
 
@@ -296,6 +313,9 @@ extension PeripheralManager {
 
     /// - Throws: PeripheralManagerError
     func writeValue(_ value: Data, for characteristic: CBCharacteristic, type: CBCharacteristicWriteType, timeout: TimeInterval) throws {
+        #if LIVE_READ_ONLY
+        throw NSError(domain: "ProjectLIVE.ReadOnly", code: 1, userInfo: [NSLocalizedDescriptionKey: "Transmitter commands are disabled in this research build"])
+        #else
         try runCommand(timeout: timeout) {
             if case .withResponse = type {
                 addCondition(.write(characteristic: characteristic))
@@ -303,6 +323,8 @@ extension PeripheralManager {
 
             peripheral.writeValue(value, for: characteristic, type: type)
         }
+
+        #endif
     }
 }
 
@@ -414,8 +436,15 @@ extension PeripheralManager: CBPeripheralDelegate {
             }
         } else if let macro = configuration.valueUpdateMacros[characteristic.uuid] {
             macro(self)
-        } else if commandConditions.isEmpty {
-            notifyDelegate = true // execute after the unlock
+        } else {
+            #if LIVE_READ_ONLY
+            // Passive control/time updates are unsolicited: a pending discovery
+            // or notification-state acknowledgement must not swallow them.
+            // A failed callback can contain a stale characteristic.value.
+            notifyDelegate = error == nil
+            #else
+            notifyDelegate = commandConditions.isEmpty
+            #endif
         }
 
         commandLock.unlock()

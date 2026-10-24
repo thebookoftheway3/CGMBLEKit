@@ -83,13 +83,13 @@ public class TransmitterManager: TransmitterDelegate {
         
         self.transmitter.needsExpiryRead = state.transmitterExpiryInDays == nil
 
-        #if targetEnvironment(simulator)
+        #if targetEnvironment(simulator) && !LIVE_READ_ONLY
         setupSimulatedSampleGenerator()
         #endif
 
     }
     
-    #if targetEnvironment(simulator)
+    #if targetEnvironment(simulator) && !LIVE_READ_ONLY
     var simulatedSampleGeneratorTimer: DispatchSourceTimer?
 
     private func setupSimulatedSampleGenerator() {
@@ -243,6 +243,10 @@ public class TransmitterManager: TransmitterDelegate {
     }
 
     public func fetchNewDataIfNeeded(_ completion: @escaping (CGMReadingResult) -> Void) {
+        #if LIVE_READ_ONLY
+        transmitter.resumeScanning()
+        completion(.noData)
+        #else
         // Ensure our transmitter connection is active
         transmitter.resumeScanning()
 
@@ -259,6 +263,8 @@ public class TransmitterManager: TransmitterDelegate {
         }
 
         shareManager.fetchNewDataIfNeeded(completion)
+
+        #endif
     }
 
     public var device: HKDevice? {
@@ -302,9 +308,20 @@ public class TransmitterManager: TransmitterDelegate {
 
     // MARK: - TransmitterDelegate
 
+    #if LIVE_READ_ONLY
+    public func transmitterDidUpdateResearchEvidence(_ transmitter: Transmitter) {
+        // Notify the app promptly even while foreground polling is stopped. This
+        // remains noData: untimed evidence is never a dated glucose observation.
+        updateDelegate(with: .noData)
+    }
+    #endif
+
     public func transmitterDidConnect(_ transmitter: Transmitter) {
         log.default("%{public}@", #function)
         latestConnection = Date()
+        #if LIVE_READ_ONLY
+        updateDelegate(with: .noData)
+        #endif
         logDeviceCommunication("Connected", type: .connection)
     }
 

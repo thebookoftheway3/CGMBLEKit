@@ -87,12 +87,18 @@ class TransmitterIDSetupViewController: SetupTableViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        #if !LIVE_READ_ONLY
         updateShareUsername()
+        #endif
 
         continueState = .inputSettings
     }
 
     // MARK: - UITableViewDelegate
+
+    #if LIVE_READ_ONLY
+    override func numberOfSections(in tableView: UITableView) -> Int { 1 }
+    #endif
 
     private enum Section: Int {
         case transmitterID
@@ -104,6 +110,9 @@ class TransmitterIDSetupViewController: SetupTableViewController {
         case .transmitterID:
             tableView.deselectRow(at: indexPath, animated: false)
         case .share:
+            #if LIVE_READ_ONLY
+            return
+            #else
             let authVC = AuthenticationViewController(authentication: shareManager.shareService)
             authVC.authenticationObserver = { [weak self] (service) in
                 self?.shareManager.shareService = service
@@ -111,6 +120,7 @@ class TransmitterIDSetupViewController: SetupTableViewController {
             }
 
             show(authVC, sender: nil)
+            #endif
         }
     }
 }

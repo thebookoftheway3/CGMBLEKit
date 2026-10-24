@@ -31,7 +31,11 @@ public struct TransmitterManagerState: RawRepresentable, Equatable {
 
     public var sensorStartOffset: UInt32?
 
+    #if LIVE_READ_ONLY
+    public var shouldSyncToRemoteService: Bool { get { false } set {} }
+    #else
     public var shouldSyncToRemoteService: Bool
+    #endif
 
     /// Transmitter-reported lifetime in days (90 for stock G6, 180 for
     /// Anubis-modded). `nil` until the first version-rx frame comes in.
@@ -49,7 +53,9 @@ public struct TransmitterManagerState: RawRepresentable, Equatable {
         sensorLifeDays: Int = Self.defaultSensorLifeDays
     ) {
         self.transmitterID = transmitterID
+        #if !LIVE_READ_ONLY
         self.shouldSyncToRemoteService = shouldSyncToRemoteService
+        #endif
         self.transmitterStartDate = transmitterStartDate
         self.sensorStartOffset = sensorStartOffset
         self.transmitterExpiryInDays = transmitterExpiryInDays

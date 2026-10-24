@@ -25,7 +25,15 @@ extension PeripheralManager {
             throw PeripheralManagerError.unknownCharacteristic
         }
 
+        #if LIVE_READ_ONLY
+        // Authentication notifications can arrive after the initial control
+        // subscription. Do not repeat an already satisfied subscription request.
+        try ResearchPassiveSubscriptions.updateNotification(current: characteristic.isNotifying, requested: enabled) {
+            try setNotifyValue(enabled, for: characteristic, timeout: timeout)
+        }
+        #else
         try setNotifyValue(enabled, for: characteristic, timeout: timeout)
+        #endif
     }
 
     func readMessage<R: TransmitterRxMessage>(
@@ -75,6 +83,9 @@ extension PeripheralManager {
         timeout: TimeInterval = 2
     ) throws -> T.Response
     {
+        #if LIVE_READ_ONLY
+        throw NSError(domain: "ProjectLIVE.ReadOnly", code: 1, userInfo: [NSLocalizedDescriptionKey: "Transmitter commands are disabled in this research build"])
+        #else
         guard let characteristic = getCharacteristicWithUUID(characteristicUUID) else {
             throw PeripheralManagerError.unknownCharacteristic
         }
@@ -114,6 +125,8 @@ extension PeripheralManager {
         }
 
         return response
+
+        #endif
     }
 
     /// - Throws: PeripheralManagerError
