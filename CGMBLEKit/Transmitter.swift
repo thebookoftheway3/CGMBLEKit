@@ -13,6 +13,9 @@ import os.log
 
 
 public protocol TransmitterDelegate: AnyObject {
+    #if LIVE_READ_ONLY
+    func transmitterDidUpdateResearchEvidence(_ transmitter: Transmitter)
+    #endif
     func transmitterDidConnect(_ transmitter: Transmitter)
 
     func transmitter(_ transmitter: Transmitter, didError error: Error)
@@ -27,6 +30,9 @@ public protocol TransmitterDelegate: AnyObject {
 }
 
 public extension TransmitterDelegate {
+    #if LIVE_READ_ONLY
+    func transmitterDidUpdateResearchEvidence(_ transmitter: Transmitter) {}
+    #endif
     // Default no-op so existing implementors don't need to opt in.
     func transmitter(_ transmitter: Transmitter, didReadTransmitterVersion message: TransmitterVersionRxMessage) {}
 }
@@ -61,6 +67,87 @@ extension TransmitterError: CustomStringConvertible {
 
 
 #if LIVE_READ_ONLY
+/// An immutable decoded packet without an absolute measurement-time reference.
+/// Receipt time is not measurement time. This is never a valid Glucose sample.
+public struct ResearchUntimedGlucose {
+    public let recordID: UUID
+    public let streamID: UUID
+    public let rawPacket: Data
+    public let receivedAt: Date
+    public let receivedUptime: TimeInterval
+    public let transmitterUptime: UInt32
+    public let sequence: UInt32
+    /// The processed G6 glucose field, before range clamping; not raw sensor signal.
+    public let glucoseRaw: UInt16
+    public let state: UInt8
+    public let status: UInt8
+    public let trend: Int8
+    public let isDisplayOnly: Bool
+    /// Conservative field-quality classification, not physiological or timing validation.
+    public let isReliable: Bool
+}
+
+/// A later observed clock reference is separate evidence, not a mutation or
+/// automatic promotion of previously untimed observations.
+public struct ResearchClockReference {
+    public let recordID: UUID
+    public let streamID: UUID
+    public let rawPacket: Data
+    public let receivedAt: Date
+    public let receivedUptime: TimeInterval
+    public let transmitterUptime: UInt32
+    public let sessionStartTime: UInt32
+    public let status: UInt8
+}
+
+enum ResearchGlucoseDisposition {
+    case invalid
+    case timed(GlucoseRxMessage)
+    case untimed
+}
+
+/// Per-instance identity deliberately makes no cross-restart/device identity claim.
+/// Caller serializes mutations; Transmitter uses the existing Locked primitive.
+struct ResearchEvidenceBuffer {
+    static let capacity = 24
+    let streamID: UUID
+    private(set) var untimed: [ResearchUntimedGlucose] = []
+    private(set) var clocks: [ResearchClockReference] = []
+    private(set) var untimedOverflowCount = 0
+    private(set) var clockOverflowCount = 0
+
+    init(streamID: UUID = UUID()) { self.streamID = streamID }
+
+    mutating func observeGlucose(_ packet: Data, receivedAt: Date, receivedUptime: TimeInterval,
+                                hasClock: Bool) -> ResearchGlucoseDisposition {
+        guard let message = GlucoseRxMessage(data: packet) else { return .invalid }
+        guard !hasClock else { return .timed(message) }
+        let value = message.glucose
+        let reliable = CalibrationState(rawValue: value.state).hasReliableGlucose &&
+            (40...400).contains(value.glucose) && !value.glucoseIsDisplayOnly &&
+            (message.status == 0 || message.status == 0x81)
+        untimed.append(ResearchUntimedGlucose(recordID: UUID(), streamID: streamID,
+            rawPacket: Data(packet), receivedAt: receivedAt, receivedUptime: receivedUptime,
+            transmitterUptime: value.timestamp, sequence: message.sequence, glucoseRaw: value.glucose,
+            state: value.state, status: message.status, trend: value.trend,
+            isDisplayOnly: value.glucoseIsDisplayOnly, isReliable: reliable))
+        if untimed.count > Self.capacity { untimed.removeFirst(); untimedOverflowCount += 1 }
+        return .untimed
+    }
+
+    mutating func observeClock(_ packet: Data, receivedAt: Date, receivedUptime: TimeInterval) -> TransmitterTimeRxMessage? {
+        guard let message = TransmitterTimeRxMessage(data: packet) else { return nil }
+        clocks.append(ResearchClockReference(recordID: UUID(), streamID: streamID,
+            rawPacket: Data(packet), receivedAt: receivedAt, receivedUptime: receivedUptime,
+            transmitterUptime: message.currentTime, sessionStartTime: message.sessionStartTime,
+            status: message.status))
+        if clocks.count > Self.capacity { clocks.removeFirst(); clockOverflowCount += 1 }
+        return message
+    }
+}
+#endif
+
+#if LIVE_READ_ONLY
 /// Notification-only setup for an already system-connected peripheral. The
 /// existing G6 app may have authenticated before this observer attached.
 /// This function cannot authenticate, request a bond, or issue transmitter commands.
@@ -93,6 +180,15 @@ public final class Transmitter: BluetoothManagerDelegate {
     #if LIVE_READ_ONLY
     public var researchConnectionDiagnostics: ResearchConnectionDiagnostics {
         bluetoothManager.researchConnectionDiagnostics
+    }
+    private let researchEvidence = Locked(ResearchEvidenceBuffer())
+    public var researchUntimedGlucose: [ResearchUntimedGlucose] { researchEvidence.value.untimed }
+    public var researchClockReferences: [ResearchClockReference] { researchEvidence.value.clocks }
+    public var researchUntimedOverflowCount: Int { researchEvidence.value.untimedOverflowCount }
+    public var researchClockOverflowCount: Int { researchEvidence.value.clockOverflowCount }
+
+    private func notifyResearchEvidenceUpdated() {
+        delegateQueue.async { self.delegate?.transmitterDidUpdateResearchEvidence(self) }
     }
     public var passiveModeEnabled: Bool { get { true } set {} }
     #else
@@ -312,6 +408,9 @@ public final class Transmitter: BluetoothManagerDelegate {
 
     func bluetoothManager(_ manager: BluetoothManager, peripheralManager: PeripheralManager, didReceiveControlResponse response: Data) {
         #if LIVE_READ_ONLY
+        guard stayConnected else { return }
+        let receivedAt = Date()
+        let receivedUptime = ProcessInfo.processInfo.systemUptime
         manager.updateResearchDiagnostics { $0.controlNotifications += 1 }
         #endif
         guard passiveModeEnabled else { return }
@@ -323,6 +422,34 @@ public final class Transmitter: BluetoothManagerDelegate {
             #if LIVE_READ_ONLY
             manager.updateResearchDiagnostics { $0.glucoseMessages += 1 }
             #endif
+            #if LIVE_READ_ONLY
+            var disposition = ResearchGlucoseDisposition.invalid
+            let evidence = researchEvidence.mutate {
+                disposition = $0.observeGlucose(response, receivedAt: receivedAt, receivedUptime: receivedUptime,
+                                               hasClock: lastTimeMessage != nil && activationDate != nil)
+            }
+            switch disposition {
+            case .invalid:
+                manager.updateResearchDiagnostics { $0.invalidGlucosePackets += 1 }
+                delegateQueue.async {
+                    self.delegate?.transmitter(self, didError: TransmitterError.observationError("Invalid glucose packet: length, opcode or CRC validation failed"))
+                }
+            case .untimed:
+                manager.updateResearchDiagnostics {
+                    $0.decodedGlucosePackets += 1
+                    $0.awaitingTimePackets += 1
+                    $0.untimedPacketsDropped = evidence.untimedOverflowCount
+                }
+                notifyResearchEvidenceUpdated()
+            case .timed(let glucoseMessage):
+                manager.updateResearchDiagnostics { $0.decodedGlucosePackets += 1 }
+                if let timeMessage = lastTimeMessage, let activationDate = activationDate {
+                    delegateQueue.async {
+                        self.delegate?.transmitter(self, didRead: Glucose(transmitterID: self.id.id, glucoseMessage: glucoseMessage, timeMessage: timeMessage, calibrationMessage: self.lastCalibrationMessage, activationDate: activationDate))
+                    }
+                }
+            }
+            #else
             if  let glucoseMessage = GlucoseRxMessage(data: response),
                 let timeMessage = lastTimeMessage,
                 let activationDate = activationDate
@@ -335,6 +462,8 @@ public final class Transmitter: BluetoothManagerDelegate {
                     self.delegate?.transmitter(self, didError: TransmitterError.observationError("Unable to handle glucose control response"))
                 }
             }
+
+            #endif
 
             peripheralManager.perform { (peripheral) in
             #if LIVE_READ_ONLY
@@ -358,12 +487,29 @@ public final class Transmitter: BluetoothManagerDelegate {
                 }
             }
         case .transmitterTimeRx?:
+            #if LIVE_READ_ONLY
+            var timeMessage: TransmitterTimeRxMessage?
+            let evidence = researchEvidence.mutate {
+                timeMessage = $0.observeClock(response, receivedAt: receivedAt, receivedUptime: receivedUptime)
+            }
+            if let timeMessage = timeMessage {
+                self.lastTimeMessage = timeMessage
+                manager.updateResearchDiagnostics {
+                    $0.timeObserved = true
+                    $0.clockReferencesDropped = evidence.clockOverflowCount
+                }
+                notifyResearchEvidenceUpdated()
+            } else {
+                manager.updateResearchDiagnostics { $0.invalidTimePackets += 1 }
+                delegateQueue.async {
+                    self.delegate?.transmitter(self, didError: TransmitterError.observationError("Invalid transmitter-time packet: length, opcode or CRC validation failed"))
+                }
+            }
+            #else
             if let timeMessage = TransmitterTimeRxMessage(data: response) {
                 self.lastTimeMessage = timeMessage
-                #if LIVE_READ_ONLY
-                manager.updateResearchDiagnostics { $0.timeObserved = true }
-                #endif
             }
+            #endif
         case .glucoseBackfillRx?:
             guard let backfillMessage = GlucoseBackfillRxMessage(data: response) else {
                 break

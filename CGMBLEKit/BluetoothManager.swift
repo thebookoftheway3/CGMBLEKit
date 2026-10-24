@@ -38,6 +38,12 @@ public struct ResearchConnectionDiagnostics {
     public internal(set) var controlNotifications = 0
     public internal(set) var timeObserved = false
     public internal(set) var glucoseMessages = 0
+    public internal(set) var decodedGlucosePackets = 0
+    public internal(set) var invalidGlucosePackets = 0
+    public internal(set) var awaitingTimePackets = 0
+    public internal(set) var invalidTimePackets = 0
+    public internal(set) var untimedPacketsDropped = 0
+    public internal(set) var clockReferencesDropped = 0
 
     public var summary: String {
         return "Connection diagnostics v1\n" +
@@ -45,6 +51,7 @@ public struct ResearchConnectionDiagnostics {
             "System queries: \(systemQueries); last candidates: \(lastCandidateCount); matches: \(lastMatchCount); connections: \(connectionCount)\n" +
             "Auth subscriptions: \(authenticationSubscriptionSuccesses)/\(authenticationSubscriptionAttempts); notifications: \(authenticationNotifications); accepted: \(authenticationAccepted)\n" +
             "Control subscriptions: \(controlSubscriptionSuccesses)/\(controlSubscriptionAttempts); notifications: \(controlNotifications); time observed: \(timeObserved); glucose messages: \(glucoseMessages)\n" +
+            "Decoded: \(decodedGlucosePackets); invalid glucose: \(invalidGlucosePackets); awaiting time: \(awaitingTimePackets); invalid time: \(invalidTimePackets); dropped untimed/clock: \(untimedPacketsDropped)/\(clockReferencesDropped)\n" +
             "Counters are cumulative, not readings."
     }
 }

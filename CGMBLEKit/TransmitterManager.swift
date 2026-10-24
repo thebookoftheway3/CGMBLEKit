@@ -308,6 +308,14 @@ public class TransmitterManager: TransmitterDelegate {
 
     // MARK: - TransmitterDelegate
 
+    #if LIVE_READ_ONLY
+    public func transmitterDidUpdateResearchEvidence(_ transmitter: Transmitter) {
+        // Notify the app promptly even while foreground polling is stopped. This
+        // remains noData: untimed evidence is never a dated glucose observation.
+        updateDelegate(with: .noData)
+    }
+    #endif
+
     public func transmitterDidConnect(_ transmitter: Transmitter) {
         log.default("%{public}@", #function)
         latestConnection = Date()
