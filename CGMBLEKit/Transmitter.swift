@@ -159,7 +159,9 @@ enum ResearchPassiveSubscriptions {
 
     static func subscribe(stillObserving: () -> Bool,
                           notify: (CGMServiceCharacteristicUUID) throws -> Void) throws {
-        for characteristic in [CGMServiceCharacteristicUUID.control, .authentication] {
+        // The already-authenticated phone connection needs only control data.
+        // An optional authentication subscription can time out after control succeeds.
+        for characteristic in [CGMServiceCharacteristicUUID.control] {
             guard stillObserving() else { return }
             try notify(characteristic)
         }
