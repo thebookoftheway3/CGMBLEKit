@@ -60,6 +60,27 @@ extension TransmitterError: CustomStringConvertible {
 }
 
 
+#if LIVE_READ_ONLY
+/// Notification-only setup for an already system-connected peripheral. The
+/// existing G6 app may have authenticated before this observer attached.
+/// This function cannot authenticate, request a bond, or issue transmitter commands.
+enum ResearchPassiveSubscriptions {
+    static func updateNotification(current: Bool, requested: Bool, change: () throws -> Void) rethrows {
+        guard current != requested else { return }
+        try change()
+    }
+
+    static func subscribe(stillObserving: () -> Bool,
+                          notify: (CGMServiceCharacteristicUUID) throws -> Void) throws {
+        for characteristic in [CGMServiceCharacteristicUUID.control, .authentication] {
+            guard stillObserving() else { return }
+            try notify(characteristic)
+        }
+    }
+}
+#endif
+
+
 public final class Transmitter: BluetoothManagerDelegate {
 
     /// The ID of the transmitter to connect to
@@ -185,14 +206,24 @@ public final class Transmitter: BluetoothManagerDelegate {
             guard self.stayConnected else { return }
             #endif
             if self.passiveModeEnabled {
-                self.log.debug("Listening for authentication responses in passive mode")
+                self.log.debug("Listening for passive notifications")
                 do {
                     #if LIVE_READ_ONLY
-                    self.bluetoothManager.updateResearchDiagnostics { $0.authenticationSubscriptionAttempts += 1 }
-                    #endif
+                    // Listen to control immediately: waiting for another authentication
+                    // notification misses sessions already authenticated by the G6 app.
+                    try ResearchPassiveSubscriptions.subscribe(stillObserving: { self.stayConnected }) { characteristic in
+                        self.bluetoothManager.updateResearchDiagnostics {
+                            if characteristic == .control { $0.controlSubscriptionAttempts += 1 }
+                            else { $0.authenticationSubscriptionAttempts += 1 }
+                        }
+                        try peripheral.listenToCharacteristic(characteristic)
+                        self.bluetoothManager.updateResearchDiagnostics {
+                            if characteristic == .control { $0.controlSubscriptionSuccesses += 1 }
+                            else { $0.authenticationSubscriptionSuccesses += 1 }
+                        }
+                    }
+                    #else
                     try peripheral.listenToCharacteristic(.authentication)
-                    #if LIVE_READ_ONLY
-                    self.bluetoothManager.updateResearchDiagnostics { $0.authenticationSubscriptionSuccesses += 1 }
                     #endif
                 } catch let error {
                     self.delegateQueue.async {
