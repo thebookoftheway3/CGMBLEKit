@@ -435,6 +435,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 central.stopScan()
             }
         }
+        #if LIVE_READ_ONLY
+        delegate?.bluetoothManagerDidUpdateResearchConnection(self)
+        #endif
     }
 
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
