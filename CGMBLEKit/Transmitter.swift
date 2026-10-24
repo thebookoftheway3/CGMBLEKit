@@ -69,9 +69,17 @@ public final class Transmitter: BluetoothManagerDelegate {
 
     private var id: TransmitterID
 
+    #if LIVE_READ_ONLY
+    public var passiveModeEnabled: Bool { get { true } set {} }
+    #else
     public var passiveModeEnabled: Bool
+    #endif
 
+    #if LIVE_READ_ONLY
+    public var needsExpiryRead: Bool { get { false } set {} }
+    #else
     public var needsExpiryRead: Bool = false
+    #endif
 
     public weak var delegate: TransmitterDelegate?
 
@@ -123,6 +131,9 @@ public final class Transmitter: BluetoothManagerDelegate {
     }
 
     public func stopScanning() {
+        #if LIVE_READ_ONLY
+        bluetoothManager.stayConnected = false
+        #endif
         bluetoothManager.disconnect()
     }
 
@@ -167,6 +178,9 @@ public final class Transmitter: BluetoothManagerDelegate {
         }
 
         peripheralManager.perform { (peripheral) in
+            #if LIVE_READ_ONLY
+            guard self.stayConnected else { return }
+            #endif
             if self.passiveModeEnabled {
                 self.log.debug("Listening for authentication responses in passive mode")
                 do {
@@ -277,6 +291,9 @@ public final class Transmitter: BluetoothManagerDelegate {
             }
 
             peripheralManager.perform { (peripheral) in
+            #if LIVE_READ_ONLY
+            guard self.stayConnected else { return }
+            #endif
                 // Subscribe to backfill updates
                 do {
                     try peripheral.listenToCharacteristic(.backfill)
@@ -403,6 +420,9 @@ public final class Transmitter: BluetoothManagerDelegate {
         if let message = AuthChallengeRxMessage(data: response), message.isBonded, message.isAuthenticated {
             self.log.debug("Observed authenticated session. enabling notifications for control characteristic.")
             peripheralManager.perform { (peripheral) in
+            #if LIVE_READ_ONLY
+            guard self.stayConnected else { return }
+            #endif
                 // Stopping updates from authentication simultaneously with Dexcom's app causes CoreBluetooth to get into a weird state.
                 /*
                 do {

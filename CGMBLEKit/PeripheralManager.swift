@@ -296,6 +296,9 @@ extension PeripheralManager {
 
     /// - Throws: PeripheralManagerError
     func writeValue(_ value: Data, for characteristic: CBCharacteristic, type: CBCharacteristicWriteType, timeout: TimeInterval) throws {
+        #if LIVE_READ_ONLY
+        throw NSError(domain: "ProjectLIVE.ReadOnly", code: 1, userInfo: [NSLocalizedDescriptionKey: "Transmitter commands are disabled in this research build"])
+        #else
         try runCommand(timeout: timeout) {
             if case .withResponse = type {
                 addCondition(.write(characteristic: characteristic))
@@ -303,6 +306,8 @@ extension PeripheralManager {
 
             peripheral.writeValue(value, for: characteristic, type: type)
         }
+
+        #endif
     }
 }
 

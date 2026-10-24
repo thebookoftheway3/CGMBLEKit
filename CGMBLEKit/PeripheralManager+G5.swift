@@ -75,6 +75,9 @@ extension PeripheralManager {
         timeout: TimeInterval = 2
     ) throws -> T.Response
     {
+        #if LIVE_READ_ONLY
+        throw NSError(domain: "ProjectLIVE.ReadOnly", code: 1, userInfo: [NSLocalizedDescriptionKey: "Transmitter commands are disabled in this research build"])
+        #else
         guard let characteristic = getCharacteristicWithUUID(characteristicUUID) else {
             throw PeripheralManagerError.unknownCharacteristic
         }
@@ -114,6 +117,8 @@ extension PeripheralManager {
         }
 
         return response
+
+        #endif
     }
 
     /// - Throws: PeripheralManagerError

@@ -83,13 +83,13 @@ public class TransmitterManager: TransmitterDelegate {
         
         self.transmitter.needsExpiryRead = state.transmitterExpiryInDays == nil
 
-        #if targetEnvironment(simulator)
+        #if targetEnvironment(simulator) && !LIVE_READ_ONLY
         setupSimulatedSampleGenerator()
         #endif
 
     }
     
-    #if targetEnvironment(simulator)
+    #if targetEnvironment(simulator) && !LIVE_READ_ONLY
     var simulatedSampleGeneratorTimer: DispatchSourceTimer?
 
     private func setupSimulatedSampleGenerator() {
@@ -243,6 +243,10 @@ public class TransmitterManager: TransmitterDelegate {
     }
 
     public func fetchNewDataIfNeeded(_ completion: @escaping (CGMReadingResult) -> Void) {
+        #if LIVE_READ_ONLY
+        transmitter.resumeScanning()
+        completion(.noData)
+        #else
         // Ensure our transmitter connection is active
         transmitter.resumeScanning()
 
@@ -259,6 +263,8 @@ public class TransmitterManager: TransmitterDelegate {
         }
 
         shareManager.fetchNewDataIfNeeded(completion)
+
+        #endif
     }
 
     public var device: HKDevice? {

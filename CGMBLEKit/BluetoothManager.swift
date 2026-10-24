@@ -127,7 +127,11 @@ class BluetoothManager: NSObject {
         super.init()
 
         managerQueue.sync {
+            #if LIVE_READ_ONLY
+            self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: [CBCentralManagerOptionRestoreIdentifierKey: "org.projectlive.loop.g6research"])
+            #else
             self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: [CBCentralManagerOptionRestoreIdentifierKey: "com.loudnate.CGMBLEKit"])
+            #endif
         }
     }
 
@@ -157,6 +161,9 @@ class BluetoothManager: NSObject {
 
     private func managerQueue_scanForPeripheral() {
         dispatchPrecondition(condition: .onQueue(managerQueue))
+        #if LIVE_READ_ONLY
+        guard stayConnected else { return }
+        #endif
 
         guard manager.state == .poweredOn else {
             return
@@ -167,6 +174,15 @@ class BluetoothManager: NSObject {
             return
         }
 
+        #if LIVE_READ_ONLY
+        // Share only a connection already owned by iOS/the existing G6 app.
+        // No scan, known-device reconnect, or application authentication fallback.
+        guard let delegate = delegate else { return }
+        let connected = manager.retrieveConnectedPeripherals(withServices: [TransmitterServiceUUID.advertisement.cbUUID, TransmitterServiceUUID.cgmService.cbUUID])
+        guard let candidate = connected.first(where: { delegate.bluetoothManager(self, shouldConnectPeripheral: $0) }) else { return }
+        self.peripheral = candidate
+        manager.connect(candidate)
+        #else
         if let peripheralID = peripheralIdentifier, let peripheral = manager.retrievePeripherals(withIdentifiers: [peripheralID]).first {
             log.debug("Re-connecting to known peripheral %{public}@", peripheral.identifier.uuidString)
             self.peripheral = peripheral
@@ -188,6 +204,7 @@ class BluetoothManager: NSObject {
                 options: nil
             )
         }
+        #endif
     }
 
     /**
@@ -249,6 +266,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
+        #if LIVE_READ_ONLY
+        managerQueue_scanForPeripheral()
+        return
+        #else
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
             for peripheral in peripherals {
                 if delegate == nil || delegate!.bluetoothManager(self, shouldConnectPeripheral: peripheral) {
@@ -257,11 +278,16 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 }
             }
         }
+        #endif
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
+        #if LIVE_READ_ONLY
+        // Never adopt newly discovered devices in the research configuration.
+        return
+        #else
         log.info("%{public}@: %{public}@", #function, peripheral)
         if delegate == nil || delegate!.bluetoothManager(self, shouldConnectPeripheral: peripheral) {
             self.peripheral = peripheral
@@ -270,10 +296,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
             central.stopScan()
         }
+        #endif
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
+        #if LIVE_READ_ONLY
+        guard stayConnected else { central.cancelPeripheralConnection(peripheral); return }
+        #endif
 
         log.default("%{public}@: %{public}@", #function, peripheral)
         if central.isScanning {

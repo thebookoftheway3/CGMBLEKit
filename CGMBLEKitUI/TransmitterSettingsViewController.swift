@@ -98,7 +98,11 @@ class TransmitterSettingsViewController: UITableViewController {
     private var sections: [Section] = []
 
     private func updateSections() {
+        #if LIVE_READ_ONLY
+        sections = Section.allCases.filter { ![.share, .remoteDataSync, .sensorLife].contains($0) }
+        #else
         sections = Section.allCases.filter { $0 != .sensorLife || cgmManager.isAnubis }
+        #endif
     }
 
     override func numberOfSections(in tableView: UITableView) -> Int {
@@ -134,6 +138,9 @@ class TransmitterSettingsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        #if LIVE_READ_ONLY
+        if sections[section] == .share { return 0 }
+        #endif
         switch sections[section] {
         case .transmitterID:
             return 1
@@ -439,6 +446,9 @@ class TransmitterSettingsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        #if LIVE_READ_ONLY
+        if sections[indexPath.section] == .share { return }
+        #endif
         switch sections[indexPath.section] {
         case .transmitterID:
             break
