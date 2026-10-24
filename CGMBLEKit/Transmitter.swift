@@ -286,6 +286,11 @@ public final class Transmitter: BluetoothManagerDelegate {
     }
 
     // MARK: - BluetoothManagerDelegate
+    #if LIVE_READ_ONLY
+    func bluetoothManagerDidUpdateResearchConnection(_ manager: BluetoothManager) {
+        notifyResearchEvidenceUpdated()
+    }
+    #endif
 
     func bluetoothManager(_ manager: BluetoothManager, peripheralManager: PeripheralManager, isReadyWithError error: Error?) {
         if let error = error {

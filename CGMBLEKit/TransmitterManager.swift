@@ -319,6 +319,9 @@ public class TransmitterManager: TransmitterDelegate {
     public func transmitterDidConnect(_ transmitter: Transmitter) {
         log.default("%{public}@", #function)
         latestConnection = Date()
+        #if LIVE_READ_ONLY
+        updateDelegate(with: .noData)
+        #endif
         logDeviceCommunication("Connected", type: .connection)
     }
 

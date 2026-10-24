@@ -9,6 +9,16 @@ import CoreBluetooth
 import Foundation
 import os.log
 
+#if LIVE_READ_ONLY
+/// Never block CoreBluetooth's callback queue behind discovery waiting for that
+/// same queue. Invalidation remains ordered before the next perform operation.
+enum ResearchPeripheralConfiguration {
+    static func invalidate(on queue: DispatchQueue, update: @escaping () -> Void) {
+        queue.async(execute: update)
+    }
+}
+#endif
+
 
 class PeripheralManager: NSObject {
 
@@ -27,9 +37,11 @@ class PeripheralManager: NSObject {
             oldValue.delegate = nil
             peripheral.delegate = self
 
-            queue.sync {
-                self.needsConfiguration = true
-            }
+            #if LIVE_READ_ONLY
+            ResearchPeripheralConfiguration.invalidate(on: queue) { self.needsConfiguration = true }
+            #else
+            queue.sync { self.needsConfiguration = true }
+            #endif
         }
     }
 
@@ -54,9 +66,11 @@ class PeripheralManager: NSObject {
 
     weak var delegate: PeripheralManagerDelegate? {
         didSet {
-            queue.sync {
-                needsConfiguration = true
-            }
+            #if LIVE_READ_ONLY
+            ResearchPeripheralConfiguration.invalidate(on: queue) { self.needsConfiguration = true }
+            #else
+            queue.sync { needsConfiguration = true }
+            #endif
         }
     }
 
@@ -69,7 +83,10 @@ class PeripheralManager: NSObject {
 
         peripheral.delegate = self
 
+        #if !LIVE_READ_ONLY
         assertConfiguration()
+        #endif
+        // Research configuration starts from readiness after delegate attachment.
     }
 }
 

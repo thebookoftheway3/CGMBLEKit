@@ -25,6 +25,10 @@ public struct ResearchConnectionDiagnostics {
     }
     public internal(set) var centralState: CentralState = .unknown
     public internal(set) var connectionStage: ConnectionStage = .idle
+    public internal(set) var connectionEventsRegistered = false
+    public internal(set) var connectionEvents = 0
+    public internal(set) var restorationEvents = 0
+    public internal(set) var restoredAttachments = 0
     public internal(set) var systemQueries = 0
     public internal(set) var lastCandidateCount = 0
     public internal(set) var lastMatchCount = 0
@@ -48,6 +52,7 @@ public struct ResearchConnectionDiagnostics {
     public var summary: String {
         return "Connection diagnostics v1\n" +
             "Bluetooth: \(centralState.rawValue); stage: \(connectionStage.rawValue)\n" +
+            "System event registration: \(connectionEventsRegistered); events: \(connectionEvents); restorations: \(restorationEvents); attached: \(restoredAttachments)\n" +
             "System queries: \(systemQueries); last candidates: \(lastCandidateCount); matches: \(lastMatchCount); connections: \(connectionCount)\n" +
             "Auth subscriptions: \(authenticationSubscriptionSuccesses)/\(authenticationSubscriptionAttempts); notifications: \(authenticationNotifications); accepted: \(authenticationAccepted)\n" +
             "Control subscriptions: \(controlSubscriptionSuccesses)/\(controlSubscriptionAttempts); notifications: \(controlNotifications); time observed: \(timeObserved); glucose messages: \(glucoseMessages)\n" +
@@ -57,8 +62,27 @@ public struct ResearchConnectionDiagnostics {
 }
 #endif
 
+#if LIVE_READ_ONLY
+/// Connection notifications are hints, never permission to connect a cached peer.
+enum ResearchConnectionRecovery {
+    static func onEvent(enabled: Bool, peerConnected: Bool, lookup: () -> Void) {
+        guard enabled, peerConnected else { return }
+        lookup()
+    }
+    static func restoredCandidate<Peer>(enabled: Bool, poweredOn: Bool, restoredIDs: Set<UUID>,
+        systemConnected: [Peer], id: (Peer) -> UUID, matches: (Peer) -> Bool,
+        locallyConnected: (Peer) -> Bool) -> Peer? {
+        guard enabled, poweredOn else { return nil }
+        return systemConnected.first { restoredIDs.contains(id($0)) && matches($0) && locallyConnected($0) }
+    }
+}
+#endif
+
 
 protocol BluetoothManagerDelegate: AnyObject {
+    #if LIVE_READ_ONLY
+    func bluetoothManagerDidUpdateResearchConnection(_ manager: BluetoothManager)
+    #endif
 
     /**
      Tells the delegate that the bluetooth manager has finished connecting to and discovering all required services of its peripheral, or that it failed to do so
@@ -114,10 +138,20 @@ class BluetoothManager: NSObject {
             lockedStayConnected.value = newValue
             #if LIVE_READ_ONLY
             if !newValue { updateResearchDiagnostics { $0.connectionStage = .paused } }
+            managerQueue.async {
+                self.managerQueue_updateEventRegistration()
+                if newValue { self.managerQueue_scanForPeripheral() }
+            }
             #endif
         }
     }
+    #if LIVE_READ_ONLY
+    private let lockedStayConnected: Locked<Bool> = Locked(false)
+    private var restoredPeripherals: [CBPeripheral] = [] // managerQueue only
+    private var eventsRegistered = false
+    #else
     private let lockedStayConnected: Locked<Bool> = Locked(true)
+    #endif
 
     #if LIVE_READ_ONLY
     private let lockedResearchDiagnostics = Locked(ResearchConnectionDiagnostics())
@@ -127,7 +161,16 @@ class BluetoothManager: NSObject {
     }
     #endif
 
-    weak var delegate: BluetoothManagerDelegate?
+    weak var delegate: BluetoothManagerDelegate? {
+        didSet {
+            #if LIVE_READ_ONLY
+            managerQueue.async {
+                self.managerQueue_updateEventRegistration()
+                self.managerQueue_scanForPeripheral()
+            }
+            #endif
+        }
+    }
 
     private let log = OSLog(category: "BluetoothManager")
 
@@ -214,8 +257,27 @@ class BluetoothManager: NSObject {
             if let peripheral = peripheral {
                 manager.cancelPeripheralConnection(peripheral)
             }
+            #if LIVE_READ_ONLY
+            for restored in restoredPeripherals where restored.identifier != peripheral?.identifier {
+                manager.cancelPeripheralConnection(restored)
+            }
+            restoredPeripherals.removeAll()
+            managerQueue_updateEventRegistration()
+            #endif
         }
     }
+
+    #if LIVE_READ_ONLY
+    private func managerQueue_updateEventRegistration() {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        guard manager.state == .poweredOn else { eventsRegistered = false; return }
+        let enabled = stayConnected && delegate != nil
+        guard enabled != eventsRegistered else { return }
+        manager.registerForConnectionEvents(options: enabled ? [.serviceUUIDs: [TransmitterServiceUUID.advertisement.cbUUID, TransmitterServiceUUID.cgmService.cbUUID]] : nil)
+        eventsRegistered = enabled
+        updateResearchDiagnostics { $0.connectionEventsRegistered = enabled }
+    }
+    #endif
 
     private func managerQueue_scanForPeripheral() {
         dispatchPrecondition(condition: .onQueue(managerQueue))
@@ -251,6 +313,18 @@ class BluetoothManager: NSObject {
             $0.lastCandidateCount = connected.count
             $0.lastMatchCount = matching.count
             $0.connectionStage = connected.isEmpty ? .noSystemConnection : .noMatchingConnection
+        }
+        if let restored = ResearchConnectionRecovery.restoredCandidate(enabled: stayConnected,
+            poweredOn: manager.state == .poweredOn,
+            restoredIDs: Set(restoredPeripherals.map { $0.identifier }),
+            systemConnected: connected, id: { $0.identifier },
+            matches: { delegate.bluetoothManager(self, shouldConnectPeripheral: $0) },
+            locallyConnected: { $0.state == .connected }) {
+            self.peripheral = restored // rebind CBPeripheralDelegate before handling notifications
+            restoredPeripherals.removeAll()
+            updateResearchDiagnostics { $0.restoredAttachments += 1; $0.connectionStage = .connected }
+            if let peripheralManager { delegate.bluetoothManager(self, peripheralManager: peripheralManager, isReadyWithError: nil) }
+            return
         }
         guard let candidate = matching.first else { return }
         self.peripheral = candidate
@@ -290,11 +364,17 @@ class BluetoothManager: NSObject {
 
      */
     fileprivate func scanAfterDelay() {
+        #if LIVE_READ_ONLY
+        // Do not sleep through the short background execution window. Future
+        // connection events trigger fresh system-connected lookup without a timer.
+        managerQueue.async { self.managerQueue_scanForPeripheral() }
+        #else
         DispatchQueue.global(qos: .utility).async {
             Thread.sleep(forTimeInterval: 2)
 
             self.scanForPeripheral()
         }
+        #endif
     }
 
     // MARK: - Accessors
@@ -340,10 +420,17 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         switch central.state {
         case .poweredOn:
+            #if LIVE_READ_ONLY
+            managerQueue_updateEventRegistration()
+            #endif
             managerQueue_scanForPeripheral()
         case .resetting, .poweredOff, .unauthorized, .unknown, .unsupported:
             fallthrough
         @unknown default:
+            #if LIVE_READ_ONLY
+            eventsRegistered = false
+            updateResearchDiagnostics { $0.connectionEventsRegistered = false }
+            #endif
             if central.isScanning {
                 central.stopScan()
             }
@@ -354,6 +441,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
         #if LIVE_READ_ONLY
+        // This callback can precede poweredOn, delegate assignment and consent
+        // activation. Retain OS-owned handles until all gates are satisfied.
+        restoredPeripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+        updateResearchDiagnostics { $0.restorationEvents += 1 }
+        managerQueue_updateEventRegistration()
         managerQueue_scanForPeripheral()
         return
         #else
@@ -367,6 +459,19 @@ extension BluetoothManager: CBCentralManagerDelegate {
         }
         #endif
     }
+
+    #if LIVE_READ_ONLY
+    func centralManager(_ central: CBCentralManager, connectionEventDidOccur event: CBConnectionEvent, for peripheral: CBPeripheral) {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        updateResearchDiagnostics { $0.connectionEvents += 1 }
+        ResearchConnectionRecovery.onEvent(enabled: stayConnected, peerConnected: event == .peerConnected) {
+            // Never connect directly from a callback or cached UUID. The existing
+            // fresh lookup, configured-name match and pending-connect guard apply.
+            self.managerQueue_scanForPeripheral()
+        }
+        delegate?.bluetoothManagerDidUpdateResearchConnection(self)
+    }
+    #endif
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
