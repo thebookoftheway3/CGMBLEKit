@@ -70,6 +70,9 @@ public final class Transmitter: BluetoothManagerDelegate {
     private var id: TransmitterID
 
     #if LIVE_READ_ONLY
+    public var researchConnectionDiagnostics: ResearchConnectionDiagnostics {
+        bluetoothManager.researchConnectionDiagnostics
+    }
     public var passiveModeEnabled: Bool { get { true } set {} }
     #else
     public var passiveModeEnabled: Bool
@@ -184,7 +187,13 @@ public final class Transmitter: BluetoothManagerDelegate {
             if self.passiveModeEnabled {
                 self.log.debug("Listening for authentication responses in passive mode")
                 do {
+                    #if LIVE_READ_ONLY
+                    self.bluetoothManager.updateResearchDiagnostics { $0.authenticationSubscriptionAttempts += 1 }
+                    #endif
                     try peripheral.listenToCharacteristic(.authentication)
+                    #if LIVE_READ_ONLY
+                    self.bluetoothManager.updateResearchDiagnostics { $0.authenticationSubscriptionSuccesses += 1 }
+                    #endif
                 } catch let error {
                     self.delegateQueue.async {
                         self.delegate?.transmitter(self, didError: error)
@@ -271,12 +280,18 @@ public final class Transmitter: BluetoothManagerDelegate {
     }
 
     func bluetoothManager(_ manager: BluetoothManager, peripheralManager: PeripheralManager, didReceiveControlResponse response: Data) {
+        #if LIVE_READ_ONLY
+        manager.updateResearchDiagnostics { $0.controlNotifications += 1 }
+        #endif
         guard passiveModeEnabled else { return }
 
         guard response.count > 0 else { return }
 
         switch Opcode(rawValue: response[0]) {
         case .glucoseRx?, .glucoseG6Rx?:
+            #if LIVE_READ_ONLY
+            manager.updateResearchDiagnostics { $0.glucoseMessages += 1 }
+            #endif
             if  let glucoseMessage = GlucoseRxMessage(data: response),
                 let timeMessage = lastTimeMessage,
                 let activationDate = activationDate
@@ -314,6 +329,9 @@ public final class Transmitter: BluetoothManagerDelegate {
         case .transmitterTimeRx?:
             if let timeMessage = TransmitterTimeRxMessage(data: response) {
                 self.lastTimeMessage = timeMessage
+                #if LIVE_READ_ONLY
+                manager.updateResearchDiagnostics { $0.timeObserved = true }
+                #endif
             }
         case .glucoseBackfillRx?:
             guard let backfillMessage = GlucoseBackfillRxMessage(data: response) else {
@@ -416,8 +434,13 @@ public final class Transmitter: BluetoothManagerDelegate {
     }
 
     func bluetoothManager(_ manager: BluetoothManager, peripheralManager: PeripheralManager, didReceiveAuthenticationResponse response: Data) {
-
+        #if LIVE_READ_ONLY
+        manager.updateResearchDiagnostics { $0.authenticationNotifications += 1 }
+        #endif
         if let message = AuthChallengeRxMessage(data: response), message.isBonded, message.isAuthenticated {
+            #if LIVE_READ_ONLY
+            manager.updateResearchDiagnostics { $0.authenticationAccepted += 1 }
+            #endif
             self.log.debug("Observed authenticated session. enabling notifications for control characteristic.")
             peripheralManager.perform { (peripheral) in
             #if LIVE_READ_ONLY
@@ -433,7 +456,13 @@ public final class Transmitter: BluetoothManagerDelegate {
                 */
 
                 do {
+                    #if LIVE_READ_ONLY
+                    self.bluetoothManager.updateResearchDiagnostics { $0.controlSubscriptionAttempts += 1 }
+                    #endif
                     try peripheral.listenToCharacteristic(.control)
+                    #if LIVE_READ_ONLY
+                    self.bluetoothManager.updateResearchDiagnostics { $0.controlSubscriptionSuccesses += 1 }
+                    #endif
                 } catch let error {
                     self.log.error("Error trying to enable notifications on control characteristic: %{public}@", String(describing: error))
                     self.delegateQueue.async {

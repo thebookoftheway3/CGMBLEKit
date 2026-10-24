@@ -11,6 +11,46 @@ import Foundation
 import os.log
 
 
+#if LIVE_READ_ONLY
+/// Sanitized, in-memory observer diagnostics. Counters are cumulative for this
+/// transmitter instance, not glucose data or evidence of a successful reading.
+public struct ResearchConnectionDiagnostics {
+    public enum CentralState: String {
+        case unknown, resetting, unsupported, unauthorized, poweredOff, poweredOn
+    }
+    public enum ConnectionStage: String {
+        case idle, paused, bluetoothUnavailable, waitingForDelegate
+        case noSystemConnection, noMatchingConnection, connecting, connected
+        case disconnected, connectionFailed
+    }
+    public internal(set) var centralState: CentralState = .unknown
+    public internal(set) var connectionStage: ConnectionStage = .idle
+    public internal(set) var systemQueries = 0
+    public internal(set) var lastCandidateCount = 0
+    public internal(set) var lastMatchCount = 0
+    public internal(set) var connectionCount = 0
+    public internal(set) var authenticationSubscriptionAttempts = 0
+    public internal(set) var authenticationSubscriptionSuccesses = 0
+    public internal(set) var authenticationNotifications = 0
+    public internal(set) var authenticationAccepted = 0
+    public internal(set) var controlSubscriptionAttempts = 0
+    public internal(set) var controlSubscriptionSuccesses = 0
+    public internal(set) var controlNotifications = 0
+    public internal(set) var timeObserved = false
+    public internal(set) var glucoseMessages = 0
+
+    public var summary: String {
+        return "Connection diagnostics v1\n" +
+            "Bluetooth: \(centralState.rawValue); stage: \(connectionStage.rawValue)\n" +
+            "System queries: \(systemQueries); last candidates: \(lastCandidateCount); matches: \(lastMatchCount); connections: \(connectionCount)\n" +
+            "Auth subscriptions: \(authenticationSubscriptionSuccesses)/\(authenticationSubscriptionAttempts); notifications: \(authenticationNotifications); accepted: \(authenticationAccepted)\n" +
+            "Control subscriptions: \(controlSubscriptionSuccesses)/\(controlSubscriptionAttempts); notifications: \(controlNotifications); time observed: \(timeObserved); glucose messages: \(glucoseMessages)\n" +
+            "Counters are cumulative, not readings."
+    }
+}
+#endif
+
+
 protocol BluetoothManagerDelegate: AnyObject {
 
     /**
@@ -65,9 +105,20 @@ class BluetoothManager: NSObject {
         }
         set {
             lockedStayConnected.value = newValue
+            #if LIVE_READ_ONLY
+            if !newValue { updateResearchDiagnostics { $0.connectionStage = .paused } }
+            #endif
         }
     }
     private let lockedStayConnected: Locked<Bool> = Locked(true)
+
+    #if LIVE_READ_ONLY
+    private let lockedResearchDiagnostics = Locked(ResearchConnectionDiagnostics())
+    var researchConnectionDiagnostics: ResearchConnectionDiagnostics { lockedResearchDiagnostics.value }
+    func updateResearchDiagnostics(_ changes: (inout ResearchConnectionDiagnostics) -> Void) {
+        _ = lockedResearchDiagnostics.mutate(changes)
+    }
+    #endif
 
     weak var delegate: BluetoothManagerDelegate?
 
@@ -166,6 +217,9 @@ class BluetoothManager: NSObject {
         #endif
 
         guard manager.state == .poweredOn else {
+            #if LIVE_READ_ONLY
+            updateResearchDiagnostics { $0.connectionStage = .bluetoothUnavailable }
+            #endif
             return
         }
 
@@ -175,12 +229,25 @@ class BluetoothManager: NSObject {
         }
 
         #if LIVE_READ_ONLY
+        // Foreground polling must not enqueue duplicate local connection requests.
+        guard currentState != .connecting else { return }
         // Share only a connection already owned by iOS/the existing G6 app.
         // No scan, known-device reconnect, or application authentication fallback.
-        guard let delegate = delegate else { return }
+        guard let delegate = delegate else {
+            updateResearchDiagnostics { $0.connectionStage = .waitingForDelegate }
+            return
+        }
         let connected = manager.retrieveConnectedPeripherals(withServices: [TransmitterServiceUUID.advertisement.cbUUID, TransmitterServiceUUID.cgmService.cbUUID])
-        guard let candidate = connected.first(where: { delegate.bluetoothManager(self, shouldConnectPeripheral: $0) }) else { return }
+        let matching = connected.filter { delegate.bluetoothManager(self, shouldConnectPeripheral: $0) }
+        updateResearchDiagnostics {
+            $0.systemQueries += 1
+            $0.lastCandidateCount = connected.count
+            $0.lastMatchCount = matching.count
+            $0.connectionStage = connected.isEmpty ? .noSystemConnection : .noMatchingConnection
+        }
+        guard let candidate = matching.first else { return }
         self.peripheral = candidate
+        updateResearchDiagnostics { $0.connectionStage = .connecting }
         manager.connect(candidate)
         #else
         if let peripheralID = peripheralIdentifier, let peripheral = manager.retrievePeripherals(withIdentifiers: [peripheralID]).first {
@@ -248,6 +315,19 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
+        #if LIVE_READ_ONLY
+        updateResearchDiagnostics {
+            switch central.state {
+            case .unknown: $0.centralState = .unknown
+            case .resetting: $0.centralState = .resetting
+            case .unsupported: $0.centralState = .unsupported
+            case .unauthorized: $0.centralState = .unauthorized
+            case .poweredOff: $0.centralState = .poweredOff
+            case .poweredOn: $0.centralState = .poweredOn
+            @unknown default: $0.centralState = .unknown
+            }
+        }
+        #endif
         peripheralManager?.centralManagerDidUpdateState(central)
         log.default("%{public}@: %{public}@", #function, String(describing: central.state.rawValue))
 
@@ -303,6 +383,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         #if LIVE_READ_ONLY
         guard stayConnected else { central.cancelPeripheralConnection(peripheral); return }
+        updateResearchDiagnostics {
+            $0.connectionStage = .connected
+            $0.connectionCount += 1
+        }
         #endif
 
         log.default("%{public}@: %{public}@", #function, peripheral)
@@ -319,6 +403,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
+        #if LIVE_READ_ONLY
+        updateResearchDiagnostics { $0.connectionStage = stayConnected ? .disconnected : .paused }
+        #endif
         log.default("%{public}@: %{public}@", #function, peripheral)
         // Ignore errors indicating the peripheral disconnected remotely, as that's expected behavior
         if let error = error as NSError?, CBError(_nsError: error).code != .peripheralDisconnected {
@@ -335,6 +422,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
+        #if LIVE_READ_ONLY
+        updateResearchDiagnostics { $0.connectionStage = stayConnected ? .connectionFailed : .paused }
+        #endif
 
         log.error("%{public}@: %{public}@", #function, String(describing: error))
         if let error = error, let peripheralManager = peripheralManager {
